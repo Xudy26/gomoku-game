@@ -83,7 +83,43 @@ THEMES = {
 }
 
 
+class PieceRenderer:
+    @staticmethod
+    def render(surface: pygame.Surface, x: int, y: int, radius: int, 
+               is_black: bool, highlight: bool = True) -> None:
+        if is_black:
+            for i in range(radius, 0, -1):
+                ratio = i / radius
+                gray = int(20 + 60 * (1 - ratio))
+                pygame.draw.circle(surface, (gray, gray, gray), (x, y), i)
+            
+            if highlight:
+                highlight_pos = (x - radius // 3, y - radius // 3)
+                pygame.draw.circle(surface, (100, 100, 100), highlight_pos, radius // 4)
+        else:
+            for i in range(radius, 0, -1):
+                ratio = i / radius
+                gray = int(250 - 30 * (1 - ratio))
+                pygame.draw.circle(surface, (gray, gray, gray), (x, y), i)
+            
+            pygame.draw.circle(surface, (200, 200, 200), (x, y), radius, 1)
+            
+            if highlight:
+                highlight_pos = (x - radius // 3, y - radius // 3)
+                pygame.draw.circle(surface, (255, 255, 255), highlight_pos, radius // 4)
+
+
 class GomokuAI:
+    PATTERN_SCORES = {
+        (5, 0): 1000000,
+        (4, 2): 100000,
+        (4, 1): 10000,
+        (3, 2): 5000,
+        (3, 1): 500,
+        (2, 2): 200,
+        (2, 1): 50,
+    }
+    
     def __init__(self, difficulty: Difficulty):
         self.difficulty = difficulty
         self.depth_map = {
@@ -96,22 +132,73 @@ class GomokuAI:
             Difficulty.MEDIUM: 0.1,
             Difficulty.HARD: 0.0,
         }
+        self._transposition_table: Dict[int, Tuple[float, int]] = {}
+    
+    def _get_board_hash(self, board: List[List[int]]) -> int:
+        h = 0
+        for row in board:
+            for cell in row:
+                h = h * 3 + cell + 1
+        return h
+    
+    def _find_winning_move(self, board: List[List[int]], player: int) -> Optional[Tuple[int, int]]:
+        candidates = self._get_candidate_moves(board)
+        for row, col in candidates:
+            board[row][col] = player
+            if self._check_five_in_a_row(board, row, col, player):
+                board[row][col] = 0
+                return (row, col)
+            board[row][col] = 0
+        return None
+    
+    def _check_five_in_a_row(self, board: List[List[int]], row: int, col: int, player: int) -> bool:
+        directions = [(0, 1), (1, 0), (1, 1), (1, -1)]
+        for dr, dc in directions:
+            count = 1
+            r, c = row + dr, col + dc
+            while 0 <= r < len(board) and 0 <= c < len(board) and board[r][c] == player:
+                count += 1
+                r += dr
+                c += dc
+            r, c = row - dr, col - dc
+            while 0 <= r < len(board) and 0 <= c < len(board) and board[r][c] == player:
+                count += 1
+                r -= dr
+                c -= dc
+            if count >= 5:
+                return True
+        return False
     
     def get_best_move(self, board: List[List[int]], player: int) -> Tuple[int, int]:
         import random
         
         depth = self.depth_map[self.difficulty]
         candidates = self._get_candidate_moves(board)
+        size = len(board)
         
         if not candidates:
-            size = len(board)
             return size // 2, size // 2
         
         if random.random() < self.random_factor[self.difficulty]:
             return random.choice(candidates)
         
+        opponent = 3 - player
+        
+        win_move = self._find_winning_move(board, player)
+        if win_move:
+            return win_move
+        
+        block_move = self._find_winning_move(board, opponent)
+        if block_move:
+            return block_move
+        
+        if len(candidates) == 1:
+            return candidates[0]
+        
         best_score = float('-inf')
         best_move = candidates[0]
+        
+        candidates = self._sort_candidates(board, candidates, player)
         
         for row, col in candidates:
             board[row][col] = player
@@ -124,8 +211,67 @@ class GomokuAI:
         
         return best_move
     
+    def _sort_candidates(self, board: List[List[int]], candidates: List[Tuple[int, int]], player: int) -> List[Tuple[int, int]]:
+        scored = []
+        opponent = 3 - player
+        for row, col in candidates:
+            board[row][col] = player
+            score = self._quick_evaluate(board, player)
+            board[row][col] = opponent
+            score += self._quick_evaluate(board, opponent) * 0.9
+            board[row][col] = 0
+            scored.append((score, row, col))
+        scored.sort(reverse=True)
+        return [(row, col) for _, row, col in scored]
+    
+    def _quick_evaluate(self, board: List[List[int]], player: int) -> float:
+        score = 0
+        size = len(board)
+        directions = [(0, 1), (1, 0), (1, 1), (1, -1)]
+        
+        for i in range(size):
+            for j in range(size):
+                if board[i][j] == player:
+                    for dr, dc in directions:
+                        count, open_ends = self._count_line(board, i, j, dr, dc, player)
+                        if count >= 5:
+                            score += 100000
+                        elif count >= 3:
+                            score += self.PATTERN_SCORES.get((count, open_ends), 0)
+        
+        return score
+    
+    def _count_line(self, board: List[List[int]], row: int, col: int, dr: int, dc: int, player: int) -> Tuple[int, int]:
+        size = len(board)
+        count = 1
+        open_ends = 0
+        
+        r, c = row + dr, col + dc
+        while 0 <= r < size and 0 <= c < size and board[r][c] == player:
+            count += 1
+            r += dr
+            c += dc
+        if 0 <= r < size and 0 <= c < size and board[r][c] == 0:
+            open_ends += 1
+        
+        r, c = row - dr, col - dc
+        while 0 <= r < size and 0 <= c < size and board[r][c] == player:
+            count += 1
+            r -= dr
+            c -= dc
+        if 0 <= r < size and 0 <= c < size and board[r][c] == 0:
+            open_ends += 1
+        
+        return count, open_ends
+    
     def _minimax(self, board: List[List[int]], depth: int, alpha: float, beta: float,
                  is_maximizing: bool, player: int) -> float:
+        board_hash = self._get_board_hash(board) ^ (depth << 10)
+        if board_hash in self._transposition_table:
+            cached_score, cached_depth = self._transposition_table[board_hash]
+            if cached_depth >= depth:
+                return cached_score
+        
         if depth == 0:
             return self._evaluate_board(board, player)
         
@@ -143,6 +289,7 @@ class GomokuAI:
                 alpha = max(alpha, eval_score)
                 if beta <= alpha:
                     break
+            self._transposition_table[board_hash] = (max_eval, depth)
             return max_eval
         else:
             min_eval = float('inf')
@@ -155,6 +302,7 @@ class GomokuAI:
                 beta = min(beta, eval_score)
                 if beta <= alpha:
                     break
+            self._transposition_table[board_hash] = (min_eval, depth)
             return min_eval
     
     def _get_candidate_moves(self, board: List[List[int]]) -> List[Tuple[int, int]]:
@@ -196,48 +344,13 @@ class GomokuAI:
         total_score = 0
         
         for dr, dc in directions:
-            count = 1
-            open_ends = 0
-            
-            r, c = row + dr, col + dc
-            while 0 <= r < len(board) and 0 <= c < len(board) and board[r][c] == player:
-                count += 1
-                r += dr
-                c += dc
-            if 0 <= r < len(board) and 0 <= c < len(board) and board[r][c] == 0:
-                open_ends += 1
-            
-            r, c = row - dr, col - dc
-            while 0 <= r < len(board) and 0 <= c < len(board) and board[r][c] == player:
-                count += 1
-                r -= dr
-                c -= dc
-            if 0 <= r < len(board) and 0 <= c < len(board) and board[r][c] == 0:
-                open_ends += 1
-            
-            total_score += self._get_pattern_score(count, open_ends)
+            count, open_ends = self._count_line(board, row, col, dr, dc, player)
+            if count >= 5:
+                total_score += 100000
+            elif count >= 3:
+                total_score += self.PATTERN_SCORES.get((count, open_ends), 0)
         
         return total_score
-    
-    def _get_pattern_score(self, count: int, open_ends: int) -> float:
-        if count >= 5:
-            return 100000
-        elif count == 4:
-            if open_ends == 2:
-                return 10000
-            elif open_ends == 1:
-                return 1000
-        elif count == 3:
-            if open_ends == 2:
-                return 1000
-            elif open_ends == 1:
-                return 100
-        elif count == 2:
-            if open_ends == 2:
-                return 100
-            elif open_ends == 1:
-                return 10
-        return 0
 
 
 @dataclass
@@ -435,17 +548,25 @@ class GameStats:
 
 
 class SaveManager:
-    SAVE_PATH = Path("d:/news-map-app/gomoku_save.json")
-    
     def __init__(self):
         self._data: Dict[str, Any] = {}
+        self._save_path: Optional[Path] = None
     
-    def save(self, config: GameConfig, stats: GameStats) -> bool:
+    @property
+    def SAVE_PATH(self) -> Path:
+        if self._save_path is None:
+            self._save_path = Path(__file__).parent / "gomoku_save.json"
+        return self._save_path
+    
+    def save(self, config: GameConfig, stats: GameStats, game_history: List[Tuple[int, int]] = None) -> bool:
         try:
             self._data = {
                 'config': config.to_dict(),
                 'stats': stats.to_dict(),
             }
+            
+            if game_history:
+                self._data['history'] = game_history
             
             self.SAVE_PATH.parent.mkdir(parents=True, exist_ok=True)
             
@@ -467,6 +588,12 @@ class SaveManager:
         except Exception as e:
             print(f"加载失败: {e}")
             return None
+    
+    def get_last_history(self) -> Optional[List[Tuple[int, int]]]:
+        data = self.load()
+        if data and 'history' in data:
+            return [(h[0], h[1]) for h in data['history']]
+        return None
     
     def apply_loaded_data(self, config: GameConfig, stats: GameStats) -> None:
         data = self.load()
@@ -672,7 +799,7 @@ class ResourceManager:
 
 
 class Particle:
-    def __init__(self, x: float, y: float, particle_type: str = 'background'):
+    def __init__(self, x: float = 0, y: float = 0, particle_type: str = 'background'):
         self.x = x
         self.y = y
         self.particle_type = particle_type
@@ -683,7 +810,10 @@ class Particle:
         self.size = 3.0
         self.color = (255, 255, 255)
         self.alpha = 255
-        
+        self.active = False
+        self._init(particle_type)
+    
+    def _init(self, particle_type: str) -> None:
         import random
         
         if particle_type == 'background':
@@ -720,6 +850,13 @@ class Particle:
             self.size = random.uniform(2.0, 4.0)
             self.color = (255, 215, 0)
             self.alpha = 255
+    
+    def reset(self, x: float, y: float, particle_type: str) -> None:
+        self.x = x
+        self.y = y
+        self.particle_type = particle_type
+        self.active = True
+        self._init(particle_type)
     
     def update(self, dt: float) -> bool:
         self.life -= dt
@@ -761,45 +898,74 @@ class Particle:
 class ParticleSystem:
     def __init__(self):
         self.particles: List[Particle] = []
+        self._pool: List[Particle] = []
         self.max_particles = 500
+    
+    def _get_particle(self, x: float, y: float, particle_type: str) -> Optional[Particle]:
+        for p in self._pool:
+            if not p.active:
+                p.reset(x, y, particle_type)
+                return p
+        
+        if len(self.particles) < self.max_particles:
+            p = Particle(x, y, particle_type)
+            p.active = True
+            self.particles.append(p)
+            return p
+        
+        return None
     
     def emit_background(self, width: int, height: int, count: int = 1) -> None:
         import random
         for _ in range(count):
-            if len(self.particles) < self.max_particles:
-                x = random.uniform(0, width)
-                y = random.uniform(0, height)
-                self.particles.append(Particle(x, y, 'background'))
+            x = random.uniform(0, width)
+            y = random.uniform(0, height)
+            p = self._get_particle(x, y, 'background')
+            if p:
+                self.particles.append(p)
     
     def emit_ripple(self, x: float, y: float, count: int = 3) -> None:
         for i in range(count):
-            if len(self.particles) < self.max_particles:
-                particle = Particle(x, y, 'ripple')
-                particle.life = 1.0 - i * 0.2
-                particle.max_life = 1.0
-                self.particles.append(particle)
+            p = self._get_particle(x, y, 'ripple')
+            if p:
+                p.life = 1.0 - i * 0.2
+                p.max_life = 1.0
+                self.particles.append(p)
     
     def emit_celebration(self, x: float, y: float, count: int = 50) -> None:
         for _ in range(count):
-            if len(self.particles) < self.max_particles:
-                self.particles.append(Particle(x, y, 'celebration'))
+            p = self._get_particle(x, y, 'celebration')
+            if p:
+                self.particles.append(p)
     
     def emit_sparkle(self, x: float, y: float, count: int = 10) -> None:
         import random
         for _ in range(count):
-            if len(self.particles) < self.max_particles:
-                px = x + random.uniform(-20, 20)
-                py = y + random.uniform(-20, 20)
-                self.particles.append(Particle(px, py, 'sparkle'))
+            px = x + random.uniform(-20, 20)
+            py = y + random.uniform(-20, 20)
+            p = self._get_particle(px, py, 'sparkle')
+            if p:
+                self.particles.append(p)
     
     def update(self, dt: float) -> None:
-        self.particles = [p for p in self.particles if p.update(dt)]
+        dead_particles = []
+        for p in self.particles:
+            if not p.update(dt):
+                dead_particles.append(p)
+        
+        for p in dead_particles:
+            p.active = False
+            self._pool.append(p)
+            self.particles.remove(p)
     
     def render(self, screen: pygame.Surface) -> None:
         for particle in self.particles:
             particle.render(screen)
     
     def clear(self) -> None:
+        for p in self.particles:
+            p.active = False
+            self._pool.append(p)
         self.particles.clear()
 
 
@@ -1659,13 +1825,7 @@ class MenuScene(BaseScene):
                 pygame.draw.circle(glow_surf, (100, 100, 100, glow_alpha), (radius * 2, radius * 2), radius * 2)
                 self.screen.blit(glow_surf, (x - radius * 2, int(y) - radius * 2))
             
-            for j in range(radius, 0, -1):
-                ratio = j / radius
-                gray = int(20 + 50 * (1 - ratio))
-                pygame.draw.circle(self.screen, (gray, gray, gray), (x, int(y)), j)
-            
-            highlight_pos = (x - radius // 3, int(y) - radius // 3)
-            pygame.draw.circle(self.screen, (80, 80, 80), highlight_pos, radius // 4)
+            PieceRenderer.render(self.screen, x, int(y), radius, is_black=True, highlight=True)
         
         for i in range(5):
             x = self.config.window_width - 50 - i * 180
@@ -1678,15 +1838,7 @@ class MenuScene(BaseScene):
                 pygame.draw.circle(glow_surf, (200, 200, 200, glow_alpha), (radius * 2, radius * 2), radius * 2)
                 self.screen.blit(glow_surf, (x - radius * 2, int(y) - radius * 2))
             
-            for j in range(radius, 0, -1):
-                ratio = j / radius
-                gray = int(250 - 30 * (1 - ratio))
-                pygame.draw.circle(self.screen, (gray, gray, gray), (x, int(y)), j)
-            
-            pygame.draw.circle(self.screen, (200, 200, 200), (x, int(y)), radius, 1)
-            
-            highlight_pos = (x - radius // 3, int(y) - radius // 3)
-            pygame.draw.circle(self.screen, (255, 255, 255), highlight_pos, radius // 4)
+            PieceRenderer.render(self.screen, x, int(y), radius, is_black=False, highlight=True)
         
         self._render_corner_decorations()
     
@@ -1769,6 +1921,7 @@ class GameScene(BaseScene):
         self.game_mode: GameMode = GameMode.PVP
         self.difficulty: Difficulty = Difficulty.MEDIUM
         self.move_history: List[Tuple[int, int]] = []
+        self.saved_history: List[Tuple[int, int]] = []
         self.win_line: List[Tuple[int, int]] = []
         self.hover_pos: Optional[Tuple[int, int]] = None
         self.winner: int = 0
@@ -1787,7 +1940,14 @@ class GameScene(BaseScene):
         self.particle_system: Optional[ParticleSystem] = None
         self.animation_offset: int = 0
         
+        self.is_replay_mode: bool = False
+        self.replay_step: int = 0
+        self.replay_speed: float = 1.0
+        self.replay_timer: float = 0.0
+        self.is_replay_playing: bool = False
+        
         self.buttons: List[Button] = []
+        self.replay_buttons: List[Button] = []
         self._calculate_board_position()
         self._create_buttons()
     
@@ -1821,19 +1981,54 @@ class GameScene(BaseScene):
             button = Button(rect, text, font, config=self.config)
             button.action = action
             self.buttons.append(button)
+        
+        self._create_replay_buttons()
+    
+    def _create_replay_buttons(self) -> None:
+        font = self.resource_manager.get_font('small')
+        button_width = 50
+        button_height = 30
+        button_y = self.config.window_height - 45
+        
+        replay_button_data = [
+            ("|<", "replay_start", self.config.window_width - 280),
+            ("<", "replay_prev", self.config.window_width - 220),
+            (">" if not self.is_replay_playing else "||", "replay_play", self.config.window_width - 160),
+            (">", "replay_next", self.config.window_width - 100),
+            (">|", "replay_end", self.config.window_width - 40),
+        ]
+        
+        self.replay_buttons = []
+        for text, action, x in replay_button_data:
+            rect = pygame.Rect(x, button_y, button_width, button_height)
+            button = Button(rect, text, font, config=self.config)
+            button.action = action
+            self.replay_buttons.append(button)
     
     def enter(self, data: Optional[Dict[str, Any]] = None) -> None:
         self.is_entering = True
         self.transition_alpha = 255
         
-        if data:
-            self.game_mode = data.get('mode', GameMode.PVP)
-            self.difficulty = data.get('difficulty', Difficulty.MEDIUM)
+        self.is_replay_mode = data.get('replay_mode', False) if data else False
+        self.replay_step = 0
+        self.replay_playing = False
+        self.replay_timer = 0.0
         
-        if self.game_mode == GameMode.PVE:
-            self.ai = GomokuAI(self.difficulty)
+        if self.is_replay_mode and 'history' in data:
+            self.saved_history = data['history']
+            self.board = [[0] * self.config.board_size for _ in range(self.config.board_size)]
+            self.move_history = []
+            self.current_player = 1
         else:
-            self.ai = None
+            self.saved_history = []
+            if data:
+                self.game_mode = data.get('mode', GameMode.PVP)
+                self.difficulty = data.get('difficulty', Difficulty.MEDIUM)
+            
+            if self.game_mode == GameMode.PVE:
+                self.ai = GomokuAI(self.difficulty)
+            else:
+                self.ai = None
         
         self.particle_system = ParticleSystem()
         self.animation_offset = 0
@@ -1863,6 +2058,31 @@ class GameScene(BaseScene):
         if self.ai_thinking:
             return
         
+        if self.is_replay_mode:
+            if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+                for button in self.replay_buttons:
+                    if button.is_clicked(event.pos):
+                        if self.sound_manager:
+                            self.sound_manager.play_click_sound()
+                        self._handle_replay_button_click(button)
+                        return
+                for button in self.buttons:
+                    if button.is_clicked(event.pos):
+                        if self.sound_manager:
+                            self.sound_manager.play_click_sound()
+                        self._handle_button_click(button)
+                        return
+            elif event.type == pygame.KEYDOWN:
+                if event.key == pygame.K_ESCAPE:
+                    self.state_manager.change_state(GameState.MENU)
+                elif event.key == pygame.K_SPACE:
+                    self._toggle_replay_play()
+                elif event.key == pygame.K_LEFT:
+                    self._replay_prev()
+                elif event.key == pygame.K_RIGHT:
+                    self._replay_next()
+            return
+        
         if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
             for button in self.buttons:
                 if button.is_clicked(event.pos):
@@ -1887,6 +2107,22 @@ class GameScene(BaseScene):
             elif event.key == pygame.K_u:
                 self._undo_move()
     
+    def _handle_replay_button_click(self, button: Button) -> None:
+        action = getattr(button, 'action', '')
+        
+        if action == "replay_start":
+            self._replay_start()
+        elif action == "replay_prev":
+            self._replay_prev()
+        elif action == "replay_play":
+            self._toggle_replay_play()
+        elif action == "replay_next":
+            self._replay_next()
+        elif action == "replay_end":
+            self._replay_end()
+        elif action == "menu":
+            self.state_manager.change_state(GameState.MENU)
+    
     def _handle_button_click(self, button: Button) -> None:
         action = getattr(button, 'action', '')
         
@@ -1896,6 +2132,39 @@ class GameScene(BaseScene):
             self._reset_game()
         elif action == "menu":
             self.state_manager.change_state(GameState.MENU)
+    
+    def _replay_start(self) -> None:
+        self.replay_step = 0
+        self.board = [[0] * self.config.board_size for _ in range(self.config.board_size)]
+        self.move_history = []
+        self.current_player = 1
+        self.is_replay_playing = False
+        self._create_replay_buttons()
+    
+    def _replay_prev(self) -> None:
+        if self.replay_step < len(self.saved_history):
+            row, col = self.saved_history[self.replay_step]
+            self.board[row][col] = self.current_player
+            self.move_history.append((row, col))
+            self.replay_step += 1
+            self.current_player = 3 - self.current_player
+        self.is_replay_playing = False
+        self._create_replay_buttons()
+    
+    def _replay_end(self) -> None:
+        self.replay_step = len(self.saved_history)
+        self.board = [[0] * self.config.board_size for _ in range(self.config.board_size)]
+        self.move_history = []
+        for i, (row, col) in enumerate(self.saved_history):
+            self.board[row][col] = 1 if i % 2 == 0 else 2
+            self.move_history.append((row, col))
+        self.current_player = 3 - self.board[saved_history[-1][0]][saved_history[-1][1]] if saved_history else 1
+        self.is_replay_playing = False
+        self._create_replay_buttons()
+    
+    def _toggle_replay_play(self) -> None:
+        self.is_replay_playing = not self.is_replay_playing
+        self._create_replay_buttons()
     
     def _screen_to_board(self, pos: Tuple[int, int]) -> Optional[Tuple[int, int]]:
         x, y = pos
@@ -1932,7 +2201,7 @@ class GameScene(BaseScene):
                 self.winner = self.current_player
                 self.state_manager.change_state(GameState.GAME_OVER)
                 self.stats.record_game(self.winner, self.game_mode, self.difficulty)
-                self.save_manager.save(self.config, self.stats)
+                self.save_manager.save(self.config, self.stats, list(self.move_history))
                 
                 if self.particle_system:
                     center_x = self.config.window_width // 2
@@ -1953,7 +2222,7 @@ class GameScene(BaseScene):
                 self.winner = 0
                 self.state_manager.change_state(GameState.GAME_OVER)
                 self.stats.record_game(0, self.game_mode, self.difficulty)
-                self.save_manager.save(self.config, self.stats)
+                self.save_manager.save(self.config, self.stats, list(self.move_history))
             else:
                 self.current_player = 3 - self.current_player
                 if self.game_mode == GameMode.PVE and self.ai and self.current_player == 2:
@@ -1981,7 +2250,7 @@ class GameScene(BaseScene):
                 self.winner = self.current_player
                 self.state_manager.change_state(GameState.GAME_OVER)
                 self.stats.record_game(self.winner, self.game_mode, self.difficulty)
-                self.save_manager.save(self.config, self.stats)
+                self.save_manager.save(self.config, self.stats, list(self.move_history))
                 if self.sound_manager:
                     if self.winner == 2:
                         self.sound_manager.play_lose_sound()
@@ -1991,7 +2260,7 @@ class GameScene(BaseScene):
                 self.winner = 0
                 self.state_manager.change_state(GameState.GAME_OVER)
                 self.stats.record_game(0, self.game_mode, self.difficulty)
-                self.save_manager.save(self.config, self.stats)
+                self.save_manager.save(self.config, self.stats, list(self.move_history))
             else:
                 self.current_player = 3 - self.current_player
     
@@ -2035,6 +2304,16 @@ class GameScene(BaseScene):
         
         self.animation_offset += 1
         
+        if self.is_replay_mode and self.is_replay_playing:
+            self.replay_timer += dt
+            if self.replay_timer >= 0.5 / self.replay_speed:
+                self.replay_timer = 0.0
+                if self.replay_step < len(self.saved_history):
+                    self._replay_next()
+                else:
+                    self.is_replay_playing = False
+                    self._create_replay_buttons()
+        
         if self.particle_system:
             self.particle_system.update(dt)
             if random.random() < 0.1:
@@ -2060,6 +2339,10 @@ class GameScene(BaseScene):
         mouse_pos = pygame.mouse.get_pos()
         for button in self.buttons:
             button.update(mouse_pos)
+        
+        if self.is_replay_mode:
+            for button in self.replay_buttons:
+                button.update(mouse_pos)
     
     def render(self) -> None:
         self.screen.fill(self.config.theme_background)
@@ -2077,7 +2360,21 @@ class GameScene(BaseScene):
         for button in self.buttons:
             button.render(self.screen, self.config)
         
+        if self.is_replay_mode:
+            self._render_replay_ui()
+        
         self.render_transition()
+    
+    def _render_replay_ui(self) -> None:
+        font = self.resource_manager.get_font('small')
+        
+        progress_text = f"{self.replay_step} / {len(self.saved_history)}"
+        text_surface = font.render(progress_text, True, self.config.theme_text)
+        text_rect = text_surface.get_rect(center=(self.config.window_width // 2, self.config.window_height - 40))
+        self.screen.blit(text_surface, text_rect)
+        
+        for button in self.replay_buttons:
+            button.render(self.screen, self.config)
     
     def _render_ai_thinking(self) -> None:
         if self.ai_thinking:
@@ -2139,29 +2436,7 @@ class GameScene(BaseScene):
     def _render_piece(self, row: int, col: int, player: int) -> None:
         x, y = self._board_to_screen(row, col)
         radius = self.config.cell_size // 2 - 3
-        
-        if player == 1:
-            for i in range(radius, 0, -1):
-                ratio = i / radius
-                gray = int(20 + 60 * (1 - ratio))
-                color = (gray, gray, gray)
-                pygame.draw.circle(self.screen, color, (x, y), i)
-            
-            highlight_pos = (x - radius // 3, y - radius // 3)
-            highlight_radius = radius // 4
-            pygame.draw.circle(self.screen, (100, 100, 100), highlight_pos, highlight_radius)
-        else:
-            for i in range(radius, 0, -1):
-                ratio = i / radius
-                gray = int(250 - 30 * (1 - ratio))
-                color = (gray, gray, gray)
-                pygame.draw.circle(self.screen, color, (x, y), i)
-            
-            pygame.draw.circle(self.screen, (200, 200, 200), (x, y), radius, 1)
-            
-            highlight_pos = (x - radius // 3, y - radius // 3)
-            highlight_radius = radius // 4
-            pygame.draw.circle(self.screen, (255, 255, 255), highlight_pos, highlight_radius)
+        PieceRenderer.render(self.screen, x, y, radius, player == 1)
     
     def _render_last_move(self) -> None:
         if self.move_history:
@@ -2436,6 +2711,13 @@ class StatsScene(BaseScene):
         reset_button.action = "reset"
         self.buttons.append(reset_button)
         
+        replay_button = Button(
+            pygame.Rect((self.config.window_width - button_width) // 2 - 130, button_y - 60, button_width, button_height),
+            "回放", font, color=(80, 120, 180), hover_color=(100, 140, 200)
+        )
+        replay_button.action = "replay"
+        self.buttons.append(replay_button)
+        
         back_button = Button(
             pygame.Rect((self.config.window_width - button_width) // 2, button_y, button_width, button_height),
             "返回", font, config=self.config
@@ -2478,6 +2760,13 @@ class StatsScene(BaseScene):
             self.state_manager.change_state(GameState.MENU)
         elif action == "reset":
             self.confirm_dialog.show()
+        elif action == "replay":
+            history = self.save_manager.get_last_history()
+            if history:
+                self.state_manager.change_state(GameState.PLAYING, {
+                    'replay_mode': True,
+                    'history': history
+                })
     
     def update(self, dt: float) -> None:
         self.update_animation()
